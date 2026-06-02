@@ -4,7 +4,7 @@ import random
 import warnings
 import numpy as np
 import pandas as pd
-import seaborn as sns
+# import seaborn as sns  # <-- COMMENT DÒNG NÀY LẠI
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import tensorflow as tf
@@ -23,20 +23,20 @@ warnings.filterwarnings('ignore')
 
 # Cấu hình trang Streamlit
 st.set_page_config(
-    page_title="Vietnamese Food Recognition 🍜",
+    page_title="NHẬN DIỆN MÓN ĂN VIỆT NAM",
     page_icon="🍜",
     layout="wide"
 )
 
-# Constants (GIỮ NGUYÊN từ code Colab)
-BATCH_SIZE = 64
+# Constants
+BATCH_SIZE = 32  # Giảm xuống để tránh memory error
 LEARNING_RATE = 0.001
-EPOCHS = 30
+EPOCHS = 15  # Giảm epochs để train nhanh hơn
 IMAGE_SIZE = (128, 128)
 LR_TRANSFER = LEARNING_RATE
 BASE_DIRS = []
 
-# Hàm tạo dataframe và gộp dataset (GIỮ NGUYÊN)
+# Hàm tạo dataframe và gộp dataset
 def create_dataframe(directory):
     filepaths, labels = [], []
     for label in os.listdir(directory):
@@ -65,7 +65,7 @@ def load_and_train():
         path = kagglehub.dataset_download("quandang/vietnamese-foods")
         BASE_DIRS.append(path)
         
-        # Load dữ liệu (GIỮ NGUYÊN cấu trúc)
+        # Load dữ liệu
         train_df = merge_datasets(BASE_DIRS, 'Train')
         valid_df = merge_datasets(BASE_DIRS, 'Validate')
         test_df = merge_datasets(BASE_DIRS, 'Test')
@@ -76,10 +76,10 @@ def load_and_train():
     
     st.success(f"✅ Train: {len(train_df)} | Validate: {len(valid_df)} | Test: {len(test_df)}")
     
-    # Data Augmentation (GIỮ NGUYÊN)
+    # Data Augmentation
     train_datagen = ImageDataGenerator(
         rescale=1./255, 
-        rotation_range=30, 
+        rotation_range=20, 
         width_shift_range=0.2, 
         shear_range=0.2, 
         zoom_range=0.2, 
@@ -117,47 +117,42 @@ def load_and_train():
     
     # Lấy danh sách classes
     CLASS_NAMES = sorted(train_generator.class_indices.keys())
+    num_classes = len(CLASS_NAMES)
     
-    # Xây dựng model (GIỮ NGUYÊN cấu trúc từ Colab)
+    # Xây dựng model (đơn giản hơn để train nhanh)
     with st.spinner("🏗️ Đang xây dựng model CNN..."):
         model = Sequential([
-            Input(shape=(224, 224, 3)),
-
+            tf.keras.layers.Input(shape=(128, 128, 3)),
+            
             # Block 1
-            Conv2D(32, (3,3), padding='same', activation='relu'),
-            BatchNormalization(),
             Conv2D(32, (3,3), padding='same', activation='relu'),
             BatchNormalization(),
             MaxPooling2D(),
             Dropout(0.25),
-
+            
             # Block 2
-            Conv2D(64, (3,3), padding='same', activation='relu'),
-            BatchNormalization(),
             Conv2D(64, (3,3), padding='same', activation='relu'),
             BatchNormalization(),
             MaxPooling2D(),
             Dropout(0.30),
-
+            
             # Block 3
-            Conv2D(128, (3,3), padding='same', activation='relu'),
-            BatchNormalization(),
             Conv2D(128, (3,3), padding='same', activation='relu'),
             BatchNormalization(),
             MaxPooling2D(),
             Dropout(0.35),
-
-            # Block 4 (thêm chiều sâu)
+            
+            # Block 4
             Conv2D(256, (3,3), padding='same', activation='relu'),
             BatchNormalization(),
             MaxPooling2D(),
             Dropout(0.40),
-
+            
             # Head
             GlobalAveragePooling2D(),
             Dense(256, activation='relu'),
             Dropout(0.5),
-            Dense(30, activation='softmax')
+            Dense(num_classes, activation='softmax')
         ])
 
         model.compile(
@@ -166,25 +161,25 @@ def load_and_train():
             metrics=['accuracy']
         )
     
-    # Callbacks (GIỮ NGUYÊN)
+    # Callbacks
     callbacks = [
         EarlyStopping(
             monitor='val_accuracy',
-            patience=5,
+            patience=3,
             restore_best_weights=True,
-            verbose=1
+            verbose=0
         ),
         ReduceLROnPlateau(
             monitor='val_loss',
             factor=0.5,
-            patience=6,
+            patience=2,
             min_lr=1e-7,
-            verbose=1
+            verbose=0
         )
     ]
     
     # Training
-    with st.spinner(f"🎓 Đang training model với {EPOCHS} epochs (mất 10-15 phút)..."):
+    with st.spinner(f"🎓 Đang training model với {EPOCHS} epochs (mất 5-10 phút)..."):
         history = model.fit(
             train_generator, 
             epochs=EPOCHS, 
@@ -197,25 +192,29 @@ def load_and_train():
     
     return model, CLASS_NAMES, history, test_generator
 
-# Hàm dự đoán (giữ nguyên phong cách từ Colab)
+# Hàm dự đoán
 def predict_image(image, model, class_names):
     """Dự đoán loại ảnh"""
     from PIL import Image as PILImage
     
-    # Resize về 224x224 như model yêu cầu
-    image = image.resize((224, 224))
+    # Resize và chuẩn hóa
+    image = image.resize((128, 128))
     img_array = np.array(image) / 255.0
-    img_array = img_array.reshape(1, 224, 224, 3)
+    img_array = img_array.reshape(1, 128, 128, 3)
     
     prediction = model.predict(img_array, verbose=0)
     predicted_class = np.argmax(prediction)
     confidence = np.max(prediction)
     
-    return class_names[predicted_class], confidence, prediction[0]
+    # Lấy top 3
+    top_3_idx = np.argsort(prediction[0])[-3:][::-1]
+    top_3_results = [(class_names[idx], prediction[0][idx]) for idx in top_3_idx]
+    
+    return class_names[predicted_class], confidence, top_3_results
 
 # Main UI
-st.title("🍜 Vietnamese Food Recognition")
-st.markdown("### Nhận diện món ăn Việt Nam bằng Deep Learning CNN")
+st.title("🍜 NHẬN DIỆN MÓN ĂN VIỆT NAM")
+st.markdown("### Sử dụng trí tuệ nhân tạo (CNN) để nhận diện các món ăn truyền thống")
 st.markdown("---")
 
 # Sidebar
@@ -228,17 +227,16 @@ with st.sidebar:
     - BatchNormalization
     - Dropout regularization
     - GlobalAveragePooling2D
-    - Dense layers
     
     **Parameters:**
     - Batch Size: {BATCH_SIZE}
     - Learning Rate: {LEARNING_RATE}
     - Epochs: {EPOCHS}
-    - Input size: 224x224
+    - Input size: 128x128
     
-    **Status:** 
-    - Lần đầu chạy sẽ train model
-    - Các lần sau dùng cache
+    **Note:** 
+    - Lần đầu chạy mất 5-10 phút để train
+    - Các lần sau dùng cache nhanh hơn
     """)
     
     if st.button("🔄 Train lại model", type="primary"):
@@ -251,7 +249,7 @@ if 'model_loaded' not in st.session_state:
 
 # Load và train model
 if not st.session_state.model_loaded:
-    with st.status("🚀 Đang khởi tạo (lần đầu mất 10-15 phút)...", expanded=True) as status:
+    with st.status("🚀 Đang khởi tạo (lần đầu mất 5-10 phút)...", expanded=True) as status:
         model, class_names, history, test_generator = load_and_train()
         st.session_state.model = model
         st.session_state.class_names = class_names
@@ -264,11 +262,14 @@ if not st.session_state.model_loaded:
 if st.session_state.model_loaded:
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("🎯 Final Accuracy", f"{st.session_state.history.history['val_accuracy'][-1]:.2%}")
+        final_acc = st.session_state.history.history['val_accuracy'][-1]
+        st.metric("🎯 Final Accuracy", f"{final_acc:.2%}")
     with col2:
-        st.metric("📈 Best Accuracy", f"{max(st.session_state.history.history['val_accuracy']):.2%}")
+        best_acc = max(st.session_state.history.history['val_accuracy'])
+        st.metric("📈 Best Accuracy", f"{best_acc:.2%}")
     with col3:
-        st.metric("🔄 Epochs trained", len(st.session_state.history.history['val_accuracy']))
+        epochs_trained = len(st.session_state.history.history['val_accuracy'])
+        st.metric("🔄 Epochs", epochs_trained)
     
     # Vẽ biểu đồ training
     with st.expander("📊 Xem biểu đồ training", expanded=False):
@@ -298,7 +299,7 @@ if st.session_state.model_loaded:
     uploaded_file = st.file_uploader(
         "Chọn file ảnh...",
         type=['jpg', 'jpeg', 'png', 'webp'],
-        help="Upload ảnh món ăn Việt Nam"
+        help="Hỗ trợ các định dạng: JPG, JPEG, PNG, WEBP"
     )
     
     if uploaded_file is not None:
@@ -312,7 +313,7 @@ if st.session_state.model_loaded:
             with st.spinner("🔍 Đang phân tích..."):
                 from PIL import Image as PILImage
                 pil_image = PILImage.open(uploaded_file)
-                food_name, confidence, all_probs = predict_image(
+                food_name, confidence, top_3 = predict_image(
                     pil_image, 
                     st.session_state.model, 
                     st.session_state.class_names
@@ -335,21 +336,14 @@ if st.session_state.model_loaded:
             </div>
             """, unsafe_allow_html=True)
             
-            # Hiển thị top 5 dự đoán
-            st.markdown("### 📊 Top 5 dự đoán:")
-            top_5_idx = np.argsort(all_probs)[-5:][::-1]
-            
-            for idx in top_5_idx:
-                prob = all_probs[idx]
-                st.markdown(f"""
-                <div style="margin: 10px 0;">
-                    <b>{st.session_state.class_names[idx]}</b>
-                </div>
-                """, unsafe_allow_html=True)
+            # Hiển thị top 3 dự đoán
+            st.markdown("### 📊 Top 3 dự đoán:")
+            for name, prob in top_3:
+                st.markdown(f"**{name}**")
                 st.progress(prob, text=f"Confidence: {prob:.1%}")
     
     # Hiển thị danh sách món ăn
-    with st.expander("🍽️ Danh sách 30 món ăn có thể nhận diện"):
+    with st.expander("🍽️ Danh sách các món ăn có thể nhận diện"):
         cols = st.columns(5)
         for idx, food in enumerate(st.session_state.class_names):
             cols[idx % 5].markdown(f"• {food}")
@@ -358,10 +352,10 @@ if st.session_state.model_loaded:
     st.markdown("---")
     st.markdown("""
     <div style="text-align: center; color: gray;">
-        <p>🎯 Model CNN từ scratch | 📊 Độ chính xác cao | 🚀 Deployed on Streamlit Cloud</p>
+        <p>🎯 CNN Model | 📊 Real-time Recognition | 🚀 Powered by TensorFlow & Streamlit</p>
         <p>Made with ❤️ for Vietnamese Cuisine</p>
     </div>
     """, unsafe_allow_html=True)
 
 # Thêm thông báo
-st.info("💡 **Lưu ý:** Lần đầu tiên chạy sẽ mất 10-15 phút để tải dataset và train model. Các lần sau sẽ nhanh hơn nhờ cache của Streamlit!")
+st.info("💡 **Lưu ý:** Lần đầu tiên chạy sẽ mất 5-10 phút để tải dataset và train model. Các lần sau sẽ nhanh hơn nhờ cache của Streamlit!")
