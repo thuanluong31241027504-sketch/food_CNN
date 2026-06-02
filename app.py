@@ -1,13 +1,9 @@
-cat > app.py << 'EOF'
 import streamlit as st
 import numpy as np
 import tensorflow as tf
 from PIL import Image
 import os
 
-# ============================================
-# CẤU HÌNH TRANG
-# ============================================
 st.set_page_config(
     page_title="NHẬN DIỆN MÓN ĂN VIỆT NAM",
     page_icon="🍜",
@@ -57,20 +53,12 @@ st.markdown("""
         background: rgba(192, 132, 252, 0.1);
         border-color: #a855f7;
     }
-    .upload-text {
-        font-family: 'SF Mono', monospace;
-        color: #8b5cf6;
-        font-size: 0.8rem;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="title">🍜 NHẬN DIỆN MÓN ĂN VIỆT NAM</div>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">upload ảnh món ăn - AI nhận diện tự động</div>', unsafe_allow_html=True)
 
-# ============================================
-# TẢI MODEL TFLITE
-# ============================================
 @st.cache_resource
 def load_tflite_model():
     model_path = "food_model.tflite"
@@ -80,9 +68,6 @@ def load_tflite_model():
         return interpreter
     return None
 
-# ============================================
-# DANH SÁCH MÓN ĂN (CẬP NHẬT THEO MODEL CỦA BẠN)
-# ============================================
 CLASS_NAMES = [
     "banh_bao", "banh_beo", "banh_canh", "banh_chung", "banh_cuon",
     "banh_khot", "banh_mi", "banh_trang", "banh_xeo", "bun_bo_hue",
@@ -91,9 +76,6 @@ CLASS_NAMES = [
     "hu_tieu", "mi_quang", "pho", "xoi"
 ]
 
-# ============================================
-# LOAD MODEL
-# ============================================
 interpreter = load_tflite_model()
 
 if interpreter is None:
@@ -106,20 +88,15 @@ if interpreter is None:
         st.success("✅ Đã tải model thành công!")
         st.rerun()
 else:
-    # Lấy thông tin input/output
     input_details = interpreter.get_input_details()
     output_details = interpreter.get_output_details()
     input_size = input_details[0]['shape'][1]
     
     st.success(f"✅ Model đã sẵn sàng! Kích thước ảnh: {input_size}x{input_size}")
     
-    # ============================================
-    # GIAO DIỆN DỰ ĐOÁN
-    # ============================================
     st.markdown("---")
     st.markdown("### 🔮 DỰ ĐOÁN MÓN ĂN")
     
-    # Chọn cách nhập ảnh
     option = st.radio("Chọn cách nhập ảnh:", ["📤 Upload ảnh", "📸 Chụp ảnh từ camera"], horizontal=True)
     
     img = None
@@ -133,7 +110,6 @@ else:
         if camera_img is not None:
             img = Image.open(camera_img)
     
-    # Hiển thị ảnh và dự đoán
     if img is not None:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
@@ -141,17 +117,14 @@ else:
         
         if st.button("🔮 NHẬN DIỆN", use_container_width=True):
             with st.spinner("Đang phân tích ảnh..."):
-                # Tiền xử lý ảnh
                 img = img.resize((input_size, input_size))
                 img_array = np.array(img, dtype=np.float32) / 255.0
                 img_array = np.expand_dims(img_array, axis=0)
                 
-                # Dự đoán
                 interpreter.set_tensor(input_details[0]['index'], img_array)
                 interpreter.invoke()
                 predictions = interpreter.get_tensor(output_details[0]['index'])
                 
-                # Lấy kết quả
                 predicted_idx = np.argmax(predictions[0])
                 confidence = np.max(predictions[0])
                 
@@ -160,7 +133,6 @@ else:
                 else:
                     food_name = f"Món {predicted_idx + 1}"
                 
-                # Hiển thị kết quả
                 st.markdown(f"""
                 <div class="result">
                     🍽️ KẾT QUẢ: {food_name}<br>
@@ -168,7 +140,6 @@ else:
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Hiển thị top 3 dự đoán
                 with st.expander("📋 Xem thêm các dự đoán khác"):
                     top_3_idx = np.argsort(predictions[0])[-3:][::-1]
                     for idx in top_3_idx:
@@ -176,9 +147,6 @@ else:
                         prob = predictions[0][idx] * 100
                         st.write(f"- {name}: {prob:.1f}%")
 
-# ============================================
-# FOOTER
-# ============================================
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #4c1d95; font-size: 0.7rem;">
@@ -187,4 +155,3 @@ st.markdown("""
     ═══════════════════════════════════════
 </div>
 """, unsafe_allow_html=True)
-EOF
