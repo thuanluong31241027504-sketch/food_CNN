@@ -1,9 +1,1 @@
-streamlit
-tensorflow
-pillow
-numpy
-pandas
-matplotlib
-seaborn
-kagglehub
-scikit-learn
+streamlit==1.28.1
