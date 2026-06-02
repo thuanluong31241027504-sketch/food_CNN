@@ -1,8 +1,10 @@
 import streamlit as st
 import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing.image import img_to_array
 from PIL import Image
-import pickle
-import gzip
+import os
 
 # ============================================
 # CẤU HÌNH TRANG
@@ -58,49 +60,14 @@ st.markdown('<div class="title">🍜 NHẬN DIỆN MÓN ĂN VIỆT NAM</div>', u
 st.markdown('<div class="subtitle">upload ảnh món ăn - AI nhận diện tự động</div>', unsafe_allow_html=True)
 
 # ============================================
-# HÀM TRÍCH XUẤT ĐẶC TRƯNG (THAY CHO TENSORFLOW)
-# ============================================
-def extract_features(img_path, img_size=(64, 64)):
-    """Trích xuất đặc trưng từ ảnh"""
-    try:
-        img = Image.open(img_path).convert('RGB')
-        img = img.resize(img_size)
-        img_array = np.array(img)
-        
-        # Đặc trưng màu sắc
-        hist_r = np.histogram(img_array[:,:,0], bins=16, range=(0, 256))[0]
-        hist_g = np.histogram(img_array[:,:,1], bins=16, range=(0, 256))[0]
-        hist_b = np.histogram(img_array[:,:,2], bins=16, range=(0, 256))[0]
-        
-        # Grayscale
-        gray = np.dot(img_array[...,:3], [0.299, 0.587, 0.114]).astype(np.uint8)
-        hist_gray = np.histogram(gray, bins=16, range=(0, 256))[0]
-        
-        # Edge features
-        gx = np.gradient(gray, axis=1)
-        gy = np.gradient(gray, axis=0)
-        edge_magnitude = np.sqrt(gx**2 + gy**2)
-        hist_edge = np.histogram(edge_magnitude.flatten(), bins=16, range=(0, 50))[0]
-        
-        features = np.concatenate([hist_r, hist_g, hist_b, hist_gray, hist_edge])
-        features = features / (features.sum() + 1e-7)
-        
-        return features
-    except Exception as e:
-        return None
-
-# ============================================
-# TẢI MODEL (DÙNG PICKLE)
+# TẢI MODEL .H5 (TENSORFLOW)
 # ============================================
 @st.cache_resource
-def load_model():
-    """Load model đã train từ file pickle"""
-    import os
-    model_path = "food_model.pkl"
-    
+def load_cnn_model():
+    """Load model CNN từ file .h5"""
+    model_path = "food_model.h5"
     if os.path.exists(model_path):
-        with open(model_path, 'rb') as f:
-            model = pickle.load(f)
+        model = load_model(model_path)
         return model
     return None
 
@@ -115,19 +82,19 @@ CLASS_NAMES = [
     "hu_tieu", "mi_quang", "pho", "xoi"
 ]
 
-model = load_model()
+model = load_cnn_model()
 
 if model is None:
-    st.info("💡 Chưa có model. Vui lòng upload model file!")
+    st.info("💡 Chưa có model. Vui lòng upload file food_model.h5!")
     
-    uploaded_model = st.file_uploader("Tải lên model (file .pkl)", type=["pkl"])
+    uploaded_model = st.file_uploader("Tải lên model CNN (file .h5)", type=["h5"])
     if uploaded_model is not None:
-        with open("food_model.pkl", "wb") as f:
+        with open("food_model.h5", "wb") as f:
             f.write(uploaded_model.getbuffer())
-        st.success("✅ Đã tải model!")
+        st.success("✅ Đã tải model CNN thành công!")
         st.rerun()
 else:
-    st.success("✅ Model đã sẵn sàng!")
+    st.success("✅ Model CNN đã sẵn sàng!")
     
     # ============================================
     # DỰ ĐOÁN
@@ -152,42 +119,32 @@ else:
         st.image(img, caption="Ảnh của bạn", use_container_width=True)
         
         if st.button("🔮 NHẬN DIỆN", use_container_width=True):
-            with st.spinner("Đang phân tích..."):
-                # Lưu ảnh tạm
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
-                    img.save(tmp_file.name)
-                    features = extract_features(tmp_file.name)
-                    import os
-                    os.unlink(tmp_file.name)
+            with st.spinner("Đang phân tích với CNN..."):
+                # Tiền xử lý ảnh (cùng kích thước với lúc train)
+                img = img.resize((128, 128))
+                img_array = img_to_array(img)
+                img_array = img_array / 255.0
+                img_array = np.expand_dims(img_array, axis=0)
                 
-                if features is not None:
-                    features = features.reshape(1, -1)
-                    
-                    # Dự đoán
-                    prediction = model.predict(features)[0]
-                    if hasattr(model, 'predict_proba'):
-                        confidence_probs = model.predict_proba(features)[0]
-                        confidence = np.max(confidence_probs)
-                    else:
-                        confidence = 0.8
-                    
-                    food_name = CLASS_NAMES[prediction].replace("_", " ").title()
-                    
-                    st.markdown(f"""
-                    <div class="result">
-                        🍽️ KẾT QUẢ: {food_name}<br>
-                        📊 ĐỘ TIN CẬY: {confidence*100:.1f}%
-                    </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.error("Không thể phân tích ảnh!")
+                # Dự đoán
+                predictions = model.predict(img_array)
+                predicted_idx = np.argmax(predictions[0])
+                confidence = np.max(predictions[0])
+                
+                food_name = CLASS_NAMES[predicted_idx].replace("_", " ").title()
+                
+                st.markdown(f"""
+                <div class="result">
+                    🍽️ KẾT QUẢ: {food_name}<br>
+                    📊 ĐỘ TIN CẬY: {confidence*100:.1f}%
+                </div>
+                """, unsafe_allow_html=True)
 
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #4c1d95; font-size: 0.7rem;">
     ═══════════════════════════════════════<br>
-    NHẬN DIỆN MÓN ĂN VIỆT NAM - AI SYSTEM<br>
+    NHẬN DIỆN MÓN ĂN VIỆT NAM - CNN MODEL<br>
     ═══════════════════════════════════════
 </div>
 """, unsafe_allow_html=True)
