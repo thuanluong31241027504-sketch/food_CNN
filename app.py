@@ -1,8 +1,7 @@
+cat > app.py << 'EOF'
 import streamlit as st
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.image import img_to_array
 from PIL import Image
 import os
 
@@ -21,7 +20,6 @@ st.markdown("""
         background: linear-gradient(135deg, #0a0a1a 0%, #1a0a2e 50%, #0a0a1a 100%);
         min-height: 100vh;
     }
-    @import url('https://fonts.googleapis.com/css2?family=SF+Mono&display=swap');
     .title {
         font-family: 'SF Mono', monospace;
         font-size: 2rem;
@@ -36,13 +34,6 @@ st.markdown("""
         color: #8b5cf6;
         margin-bottom: 40px;
     }
-    .stButton > button {
-        background: transparent;
-        color: #c084fc !important;
-        border: 2px solid #c084fc;
-        border-radius: 8px !important;
-        font-family: 'SF Mono', monospace !important;
-    }
     .result {
         font-family: 'SF Mono', monospace;
         font-size: 1.2rem;
@@ -53,6 +44,24 @@ st.markdown("""
         border-radius: 8px;
         margin-top: 20px;
     }
+    .stButton > button {
+        background: transparent;
+        color: #c084fc !important;
+        border: 2px solid #c084fc;
+        border-radius: 8px !important;
+        font-family: 'SF Mono', monospace !important;
+        width: 100%;
+        padding: 10px;
+    }
+    .stButton > button:hover {
+        background: rgba(192, 132, 252, 0.1);
+        border-color: #a855f7;
+    }
+    .upload-text {
+        font-family: 'SF Mono', monospace;
+        color: #8b5cf6;
+        font-size: 0.8rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -60,15 +69,15 @@ st.markdown('<div class="title">🍜 NHẬN DIỆN MÓN ĂN VIỆT NAM</div>', u
 st.markdown('<div class="subtitle">upload ảnh món ăn - AI nhận diện tự động</div>', unsafe_allow_html=True)
 
 # ============================================
-# TẢI MODEL .H5 (TENSORFLOW)
+# TẢI MODEL TFLITE
 # ============================================
 @st.cache_resource
-def load_cnn_model():
-    """Load model CNN từ file .h5"""
-    model_path = "food_model.h5"
+def load_tflite_model():
+    model_path = "food_model.tflite"
     if os.path.exists(model_path):
-        model = load_model(model_path)
-        return model
+        interpreter = tf.lite.Interpreter(model_path=model_path)
+        interpreter.allocate_tensors()
+        return interpreter
     return None
 
 # ============================================
@@ -82,27 +91,36 @@ CLASS_NAMES = [
     "hu_tieu", "mi_quang", "pho", "xoi"
 ]
 
-model = load_cnn_model()
+# ============================================
+# LOAD MODEL
+# ============================================
+interpreter = load_tflite_model()
 
-if model is None:
-    st.info("💡 Chưa có model. Vui lòng upload file food_model.h5!")
+if interpreter is None:
+    st.error("❌ Không tìm thấy file model! Vui lòng upload file food_model.tflite")
     
-    uploaded_model = st.file_uploader("Tải lên model CNN (file .h5)", type=["h5"])
+    uploaded_model = st.file_uploader("Tải lên model TFLite (file .tflite)", type=["tflite"])
     if uploaded_model is not None:
-        with open("food_model.h5", "wb") as f:
+        with open("food_model.tflite", "wb") as f:
             f.write(uploaded_model.getbuffer())
-        st.success("✅ Đã tải model CNN thành công!")
+        st.success("✅ Đã tải model thành công!")
         st.rerun()
 else:
-    st.success("✅ Model CNN đã sẵn sàng!")
+    # Lấy thông tin input/output
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    input_size = input_details[0]['shape'][1]
+    
+    st.success(f"✅ Model đã sẵn sàng! Kích thước ảnh: {input_size}x{input_size}")
     
     # ============================================
-    # DỰ ĐOÁN
+    # GIAO DIỆN DỰ ĐOÁN
     # ============================================
     st.markdown("---")
     st.markdown("### 🔮 DỰ ĐOÁN MÓN ĂN")
     
-    option = st.radio("Chọn cách nhập ảnh:", ["📤 Upload ảnh", "📸 Chụp ảnh từ camera"])
+    # Chọn cách nhập ảnh
+    option = st.radio("Chọn cách nhập ảnh:", ["📤 Upload ảnh", "📸 Chụp ảnh từ camera"], horizontal=True)
     
     img = None
     
@@ -115,36 +133,58 @@ else:
         if camera_img is not None:
             img = Image.open(camera_img)
     
+    # Hiển thị ảnh và dự đoán
     if img is not None:
-        st.image(img, caption="Ảnh của bạn", use_container_width=True)
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.image(img, caption="Ảnh của bạn", use_container_width=True)
         
         if st.button("🔮 NHẬN DIỆN", use_container_width=True):
-            with st.spinner("Đang phân tích với CNN..."):
-                # Tiền xử lý ảnh (cùng kích thước với lúc train)
-                img = img.resize((128, 128))
-                img_array = img_to_array(img)
-                img_array = img_array / 255.0
+            with st.spinner("Đang phân tích ảnh..."):
+                # Tiền xử lý ảnh
+                img = img.resize((input_size, input_size))
+                img_array = np.array(img, dtype=np.float32) / 255.0
                 img_array = np.expand_dims(img_array, axis=0)
                 
                 # Dự đoán
-                predictions = model.predict(img_array)
+                interpreter.set_tensor(input_details[0]['index'], img_array)
+                interpreter.invoke()
+                predictions = interpreter.get_tensor(output_details[0]['index'])
+                
+                # Lấy kết quả
                 predicted_idx = np.argmax(predictions[0])
                 confidence = np.max(predictions[0])
                 
-                food_name = CLASS_NAMES[predicted_idx].replace("_", " ").title()
+                if predicted_idx < len(CLASS_NAMES):
+                    food_name = CLASS_NAMES[predicted_idx].replace("_", " ").title()
+                else:
+                    food_name = f"Món {predicted_idx + 1}"
                 
+                # Hiển thị kết quả
                 st.markdown(f"""
                 <div class="result">
                     🍽️ KẾT QUẢ: {food_name}<br>
                     📊 ĐỘ TIN CẬY: {confidence*100:.1f}%
                 </div>
                 """, unsafe_allow_html=True)
+                
+                # Hiển thị top 3 dự đoán
+                with st.expander("📋 Xem thêm các dự đoán khác"):
+                    top_3_idx = np.argsort(predictions[0])[-3:][::-1]
+                    for idx in top_3_idx:
+                        name = CLASS_NAMES[idx].replace("_", " ").title() if idx < len(CLASS_NAMES) else f"Món {idx + 1}"
+                        prob = predictions[0][idx] * 100
+                        st.write(f"- {name}: {prob:.1f}%")
 
+# ============================================
+# FOOTER
+# ============================================
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #4c1d95; font-size: 0.7rem;">
     ═══════════════════════════════════════<br>
-    NHẬN DIỆN MÓN ĂN VIỆT NAM - CNN MODEL<br>
+    NHẬN DIỆN MÓN ĂN VIỆT NAM - TFLITE MODEL<br>
     ═══════════════════════════════════════
 </div>
 """, unsafe_allow_html=True)
+EOF
