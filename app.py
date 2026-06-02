@@ -1,18 +1,18 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, BatchNormalization, MaxPooling2D, Dropout, GlobalAveragePooling2D, Dense, Input
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.preprocessing.image import ImageDataGenerator, img_to_array
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 import matplotlib.pyplot as plt
+from PIL import Image
 import os
 import zipfile
 import tempfile
 import time
-from PIL import Image
+import cv2
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, classification_report
+import pickle
 
 # ============================================
 # CẤU HÌNH TRANG
@@ -65,92 +65,88 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="title">🍜 NHẬN DIỆN MÓN ĂN VIỆT NAM</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">tải lên dataset để train model hoặc dùng model có sẵn</div>', unsafe_allow_html=True)
-
-# ============================================
-# THAM SỐ
-# ============================================
-IMAGE_SIZE = (128, 128)
-BATCH_SIZE = 32
-LEARNING_RATE = 0.001
-
-# ============================================
-# HÀM TẠO MODEL (GIỮ NGUYÊN CODE CỦA BẠN)
-# ============================================
-def create_model(num_classes=30):
-    model = Sequential([
-        Input(shape=(128, 128, 3)),
-        
-        # Block 1
-        Conv2D(32, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        Conv2D(32, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        MaxPooling2D(),
-        Dropout(0.25),
-        
-        # Block 2
-        Conv2D(64, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        Conv2D(64, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        MaxPooling2D(),
-        Dropout(0.30),
-        
-        # Block 3
-        Conv2D(128, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        Conv2D(128, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        MaxPooling2D(),
-        Dropout(0.35),
-        
-        # Block 4
-        Conv2D(256, (3,3), padding='same', activation='relu'),
-        BatchNormalization(),
-        MaxPooling2D(),
-        Dropout(0.40),
-        
-        # Head
-        GlobalAveragePooling2D(),
-        Dense(256, activation='relu'),
-        Dropout(0.5),
-        Dense(num_classes, activation='softmax')
-    ])
-    
-    model.compile(
-        optimizer=Adam(learning_rate=LEARNING_RATE),
-        loss='categorical_crossentropy',
-        metrics=['accuracy']
-    )
-    return model
+st.markdown('<div class="subtitle">tải lên dataset để train model - nhận diện món ăn từ ảnh</div>', unsafe_allow_html=True)
 
 # ============================================
 # KHỞI TẠO SESSION STATE
 # ============================================
 if 'model' not in st.session_state:
     st.session_state.model = None
+    st.session_state.label_encoder = None
     st.session_state.class_names = []
     st.session_state.model_ready = False
 
 # ============================================
-# TẢI LÊN DATASET VÀ TRAIN
+# HÀM TRÍCH XUẤT ĐẶC TRƯNG TỪ ẢNH
+# ============================================
+def extract_features(img_path, img_size=(64, 64)):
+    """Trích xuất đặc trưng cơ bản từ ảnh"""
+    img = cv2.imread(img_path)
+    if img is None:
+        return None
+    img = cv2.resize(img, img_size)
+    
+    # Chuyển sang HSV để trích xuất màu sắc
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    
+    # Đặc trưng màu sắc (histogram)
+    hist_hue = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten()
+    hist_sat = cv2.calcHist([hsv], [1], None, [16], [0, 256]).flatten()
+    hist_val = cv2.calcHist([hsv], [2], None, [16], [0, 256]).flatten()
+    
+    # Đặc trưng kết cấu (gray)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    hist_gray = cv2.calcHist([gray], [0], None, [16], [0, 256]).flatten()
+    
+    # Đặc trưng cạnh (Sobel)
+    sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    edge_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
+    hist_edge = cv2.calcHist([edge_magnitude.astype(np.uint8)], [0], None, [16], [0, 256]).flatten()
+    
+    # Kết hợp tất cả đặc trưng
+    features = np.concatenate([hist_hue, hist_sat, hist_val, hist_gray, hist_edge])
+    
+    return features / (features.sum() + 1e-7)
+
+# ============================================
+# HÀM LOAD DATASET
+# ============================================
+def load_dataset_from_folder(folder_path):
+    """Load ảnh từ folder và trích xuất đặc trưng"""
+    filepaths = []
+    labels = []
+    
+    for label in os.listdir(folder_path):
+        label_path = os.path.join(folder_path, label)
+        if os.path.isdir(label_path):
+            for file in os.listdir(label_path):
+                if file.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    filepaths.append(os.path.join(label_path, file))
+                    labels.append(label)
+    
+    if len(filepaths) == 0:
+        return None, None
+    
+    # Trích xuất đặc trưng cho từng ảnh
+    features = []
+    with st.spinner("Đang trích xuất đặc trưng từ ảnh..."):
+        progress_bar = st.progress(0)
+        for i, fp in enumerate(filepaths):
+            feat = extract_features(fp)
+            if feat is not None:
+                features.append(feat)
+            progress_bar.progress((i + 1) / len(filepaths))
+    
+    return np.array(features), np.array(labels)
+
+# ============================================
+# BƯỚC 1: TẢI LÊN DATASET
 # ============================================
 st.markdown("---")
 st.markdown("### 📁 BƯỚC 1: TẢI LÊN DATASET")
 
 uploaded_zip = st.file_uploader("Tải lên file dataset.zip (chứa thư mục Train, Validate, Test)", type=["zip"])
-
-def create_dataframe(directory):
-    filepaths, labels = [], []
-    for label in os.listdir(directory):
-        class_dir = os.path.join(directory, label)
-        if os.path.isdir(class_dir):
-            for file in os.listdir(class_dir):
-                if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-                    filepaths.append(os.path.join(class_dir, file))
-                    labels.append(label)
-    return pd.DataFrame({'filepath': filepaths, 'label': labels})
 
 if uploaded_zip is not None:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -171,135 +167,97 @@ if uploaded_zip is not None:
                         base_dir = item_path
                         break
         
-        # Tìm đúng tên thư mục (Train hay train)
+        # Tìm các thư mục
         train_folder = None
-        valid_folder = None
-        test_folder = None
-        
         for folder in os.listdir(base_dir):
             if folder.lower() == 'train':
                 train_folder = folder
-            elif folder.lower() == 'validate' or folder.lower() == 'val':
-                valid_folder = folder
-            elif folder.lower() == 'test':
-                test_folder = folder
+                break
         
         if train_folder:
             train_dir = os.path.join(base_dir, train_folder)
-            train_df = create_dataframe(train_dir)
             
-            valid_df = pd.DataFrame()
-            if valid_folder:
-                valid_dir = os.path.join(base_dir, valid_folder)
-                valid_df = create_dataframe(valid_dir)
+            st.info("Đang load dữ liệu train...")
+            X_train, y_train = load_dataset_from_folder(train_dir)
             
-            test_df = pd.DataFrame()
-            if test_folder:
-                test_dir = os.path.join(base_dir, test_folder)
-                test_df = create_dataframe(test_dir)
-            
-            st.success(f"✅ Đã tải dataset: Train: {len(train_df)} | Validate: {len(valid_df)} | Test: {len(test_df)}")
-            
-            # Lấy class names
-            class_names = sorted(train_df['label'].unique())
-            st.session_state.class_names = class_names
-            num_classes = len(class_names)
-            
-            st.write(f"📋 Số loại món ăn: {num_classes}")
-            st.write(f"🍽️ Các món: {', '.join(class_names[:10])}" + ("..." if len(class_names) > 10 else ""))
-            
-            # Tạo model
-            st.session_state.model = create_model(num_classes)
-            
-            # Data generators
-            train_datagen = ImageDataGenerator(
-                rescale=1./255, rotation_range=30, width_shift_range=0.2,
-                shear_range=0.2, zoom_range=0.2, horizontal_flip=True, fill_mode='nearest'
-            )
-            valid_datagen = ImageDataGenerator(rescale=1./255)
-            
-            train_generator = train_datagen.flow_from_dataframe(
-                train_df, x_col='filepath', y_col='label', target_size=IMAGE_SIZE,
-                batch_size=BATCH_SIZE, class_mode='categorical'
-            )
-            
-            valid_generator = None
-            if len(valid_df) > 0:
-                valid_generator = valid_datagen.flow_from_dataframe(
-                    valid_df, x_col='filepath', y_col='label', target_size=IMAGE_SIZE,
-                    batch_size=BATCH_SIZE, class_mode='categorical'
+            if X_train is not None:
+                st.success(f"✅ Đã load {len(X_train)} ảnh train với {len(np.unique(y_train))} loại món")
+                
+                st.session_state.class_names = sorted(np.unique(y_train))
+                
+                st.write(f"📋 Các món ăn: {', '.join(st.session_state.class_names)}")
+                
+                # ============================================
+                # BƯỚC 2: TRAIN MODEL
+                # ============================================
+                st.markdown("---")
+                st.markdown("### 🚀 BƯỚC 2: TRAIN MODEL")
+                
+                # Encode labels
+                label_encoder = LabelEncoder()
+                y_train_encoded = label_encoder.fit_transform(y_train)
+                st.session_state.label_encoder = label_encoder
+                
+                # Chia train/val
+                X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+                    X_train, y_train_encoded, test_size=0.2, random_state=42, stratify=y_train_encoded
                 )
-            
-            # ============================================
-            # BƯỚC 2: TRAIN MODEL
-            # ============================================
-            st.markdown("---")
-            st.markdown("### 🚀 BƯỚC 2: TRAIN MODEL")
-            
-            epochs = st.slider("Số epochs", 5, 50, 20)
-            
-            if st.button("BẮT ĐẦU TRAIN", use_container_width=True):
-                progress_bar = st.progress(0)
-                status_text = st.empty()
                 
-                callbacks = [
-                    EarlyStopping(monitor='val_accuracy' if valid_generator else 'accuracy', 
-                                 patience=5, restore_best_weights=True, verbose=0),
-                    ReduceLROnPlateau(monitor='val_loss' if valid_generator else 'loss', 
-                                     factor=0.5, patience=3, min_lr=1e-7, verbose=0)
-                ]
+                st.write(f"📊 Train: {len(X_train_split)} ảnh | Validation: {len(X_val_split)} ảnh")
                 
-                history = {'accuracy': [], 'loss': []}
-                if valid_generator:
-                    history['val_accuracy'] = []
-                    history['val_loss'] = []
+                # Tham số model
+                n_estimators = st.slider("Số cây (n_estimators)", 50, 300, 100, step=50)
+                max_depth = st.slider("Độ sâu tối đa (max_depth)", 10, 50, 20, step=5)
                 
-                for epoch in range(epochs):
-                    status_text.text(f"Epoch {epoch+1}/{epochs} - đang train...")
+                if st.button("🚀 BẮT ĐẦU TRAIN", use_container_width=True):
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
                     
-                    if valid_generator:
-                        history_epoch = st.session_state.model.fit(
-                            train_generator,
-                            validation_data=valid_generator,
-                            epochs=1,
-                            callbacks=callbacks,
-                            verbose=0
-                        )
-                        history['val_accuracy'].extend(history_epoch.history.get('val_accuracy', []))
-                        history['val_loss'].extend(history_epoch.history.get('val_loss', []))
-                    else:
-                        history_epoch = st.session_state.model.fit(
-                            train_generator,
-                            epochs=1,
-                            callbacks=callbacks,
-                            verbose=0
-                        )
+                    # Train Random Forest
+                    status_text.text("Đang train Random Forest...")
                     
-                    history['accuracy'].extend(history_epoch.history.get('accuracy', []))
-                    history['loss'].extend(history_epoch.history.get('loss', []))
+                    model = RandomForestClassifier(
+                        n_estimators=n_estimators,
+                        max_depth=max_depth,
+                        random_state=42,
+                        n_jobs=-1
+                    )
                     
-                    progress_bar.progress((epoch + 1) / epochs)
-                
-                status_text.text("✅ Hoàn thành training!")
-                st.session_state.model_ready = True
-                
-                # Vẽ biểu đồ
-                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-                ax1.plot(history['accuracy'], label='Train')
-                if valid_generator and 'val_accuracy' in history:
-                    ax1.plot(history['val_accuracy'], label='Validation')
-                ax1.set_title('Accuracy')
-                ax1.legend()
-                ax2.plot(history['loss'], label='Train')
-                if valid_generator and 'val_loss' in history:
-                    ax2.plot(history['val_loss'], label='Validation')
-                ax2.set_title('Loss')
-                ax2.legend()
-                st.pyplot(fig)
-                
-                st.success("🎉 Model đã được train xong! Chuyển sang bước 3 để dự đoán.")
+                    model.fit(X_train_split, y_train_split)
+                    
+                    progress_bar.progress(0.8)
+                    status_text.text("Đang đánh giá model...")
+                    
+                    # Đánh giá
+                    y_pred = model.predict(X_val_split)
+                    accuracy = accuracy_score(y_val_split, y_pred)
+                    
+                    st.session_state.model = model
+                    st.session_state.model_ready = True
+                    
+                    progress_bar.progress(1.0)
+                    status_text.text("✅ Hoàn thành!")
+                    
+                    st.success(f"🎉 Accuracy trên validation: {accuracy*100:.2f}%")
+                    
+                    # Hiển thị báo cáo
+                    st.markdown("#### 📊 Báo cáo chi tiết:")
+                    report = classification_report(y_val_split, y_pred, target_names=st.session_state.class_names, output_dict=True)
+                    
+                    # Chuyển thành DataFrame để hiển thị
+                    report_df = pd.DataFrame(report).transpose()
+                    st.dataframe(report_df)
+                    
+                    # Lưu model
+                    model_path = os.path.join(tmpdir, "model.pkl")
+                    with open(model_path, "wb") as f:
+                        pickle.dump((model, label_encoder, st.session_state.class_names), f)
+                    
+                    st.info("💡 Model đã sẵn sàng! Chuyển sang Bước 3 để dự đoán.")
+            else:
+                st.error("Không thể load dữ liệu từ folder Train!")
         else:
-            st.error("Không tìm thấy thư mục Train trong file zip!")
+            st.error("Không tìm thấy thư mục Train!")
 
 # ============================================
 # BƯỚC 3: DỰ ĐOÁN
@@ -324,23 +282,43 @@ if st.session_state.model_ready and st.session_state.model is not None:
     if img is not None:
         st.image(img, caption="Ảnh của bạn", use_container_width=True)
         
-        img_resized = img.resize(IMAGE_SIZE)
-        img_array = img_to_array(img_resized)
-        img_array = img_array / 255.0
-        img_array = np.expand_dims(img_array, axis=0)
-        
-        if st.button("NHẬN DIỆN", use_container_width=True):
+        if st.button("🔮 NHẬN DIỆN", use_container_width=True):
             with st.spinner("Đang phân tích..."):
-                time.sleep(0.5)
-                predictions = st.session_state.model.predict(img_array)
-                predicted_idx = np.argmax(predictions[0])
-                confidence = np.max(predictions[0])
+                # Lưu ảnh tạm
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp_file:
+                    img.save(tmp_file.name)
+                    # Trích xuất đặc trưng
+                    features = extract_features(tmp_file.name)
+                    os.unlink(tmp_file.name)
                 
-                food_name = st.session_state.class_names[predicted_idx]
-                
-                st.markdown(f"""
-                <div class="result">
-                    🍽️ KẾT QUẢ: {food_name}<br>
-                    📊 ĐỘ TIN CẬY: {confidence*100:.1f}%
-                </div>
-                """, unsafe_allow_html=True)
+                if features is not None:
+                    features = features.reshape(1, -1)
+                    prediction = st.session_state.model.predict(features)[0]
+                    confidence_probs = st.session_state.model.predict_proba(features)[0]
+                    confidence = np.max(confidence_probs)
+                    
+                    food_name = st.session_state.class_names[prediction]
+                    
+                    st.markdown(f"""
+                    <div class="result">
+                        🍽️ KẾT QUẢ: {food_name}<br>
+                        📊 ĐỘ TIN CẬY: {confidence*100:.1f}%
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.error("Không thể phân tích ảnh. Vui lòng thử ảnh khác!")
+else:
+    if uploaded_zip is None:
+        st.info("💡 Hãy tải lên dataset và train model trước khi dự đoán!")
+
+# ============================================
+# FOOTER
+# ============================================
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: #4c1d95; font-size: 0.7rem;">
+    ═══════════════════════════════════════<br>
+    NHẬN DIỆN MÓN ĂN VIỆT NAM - AI SYSTEM<br>
+    ═══════════════════════════════════════
+</div>
+""", unsafe_allow_html=True)
