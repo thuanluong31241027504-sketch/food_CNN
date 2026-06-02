@@ -7,12 +7,14 @@ import os
 import zipfile
 import tempfile
 import time
-import cv2
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, classification_report
 import pickle
+from scipy.ndimage import sobel
+import warnings
+warnings.filterwarnings('ignore')
 
 # ============================================
 # CẤU HÌNH TRANG
@@ -77,37 +79,39 @@ if 'model' not in st.session_state:
     st.session_state.model_ready = False
 
 # ============================================
-# HÀM TRÍCH XUẤT ĐẶC TRƯNG TỪ ẢNH
+# HÀM TRÍCH XUẤT ĐẶC TRƯNG TỪ ẢNH (KHÔNG DÙNG CV2)
 # ============================================
 def extract_features(img_path, img_size=(64, 64)):
-    """Trích xuất đặc trưng cơ bản từ ảnh"""
-    img = cv2.imread(img_path)
-    if img is None:
+    """Trích xuất đặc trưng cơ bản từ ảnh sử dụng PIL và numpy"""
+    try:
+        img = Image.open(img_path).convert('RGB')
+        img = img.resize(img_size)
+        img_array = np.array(img)
+        
+        # Đặc trưng màu sắc RGB
+        hist_r = np.histogram(img_array[:,:,0], bins=16, range=(0, 256))[0]
+        hist_g = np.histogram(img_array[:,:,1], bins=16, range=(0, 256))[0]
+        hist_b = np.histogram(img_array[:,:,2], bins=16, range=(0, 256))[0]
+        
+        # Chuyển sang grayscale
+        gray = np.dot(img_array[...,:3], [0.299, 0.587, 0.114]).astype(np.uint8)
+        hist_gray = np.histogram(gray, bins=16, range=(0, 256))[0]
+        
+        # Đặc trưng cạnh (dùng gradient đơn giản)
+        gx = np.gradient(gray, axis=1)
+        gy = np.gradient(gray, axis=0)
+        edge_magnitude = np.sqrt(gx**2 + gy**2)
+        hist_edge = np.histogram(edge_magnitude.flatten(), bins=16, range=(0, 50))[0]
+        
+        # Kết hợp tất cả đặc trưng
+        features = np.concatenate([hist_r, hist_g, hist_b, hist_gray, hist_edge])
+        
+        # Chuẩn hóa
+        features = features / (features.sum() + 1e-7)
+        
+        return features
+    except Exception as e:
         return None
-    img = cv2.resize(img, img_size)
-    
-    # Chuyển sang HSV để trích xuất màu sắc
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    
-    # Đặc trưng màu sắc (histogram)
-    hist_hue = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten()
-    hist_sat = cv2.calcHist([hsv], [1], None, [16], [0, 256]).flatten()
-    hist_val = cv2.calcHist([hsv], [2], None, [16], [0, 256]).flatten()
-    
-    # Đặc trưng kết cấu (gray)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    hist_gray = cv2.calcHist([gray], [0], None, [16], [0, 256]).flatten()
-    
-    # Đặc trưng cạnh (Sobel)
-    sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-    sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-    edge_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
-    hist_edge = cv2.calcHist([edge_magnitude.astype(np.uint8)], [0], None, [16], [0, 256]).flatten()
-    
-    # Kết hợp tất cả đặc trưng
-    features = np.concatenate([hist_hue, hist_sat, hist_val, hist_gray, hist_edge])
-    
-    return features / (features.sum() + 1e-7)
 
 # ============================================
 # HÀM LOAD DATASET
@@ -130,15 +134,23 @@ def load_dataset_from_folder(folder_path):
     
     # Trích xuất đặc trưng cho từng ảnh
     features = []
-    with st.spinner("Đang trích xuất đặc trưng từ ảnh..."):
-        progress_bar = st.progress(0)
-        for i, fp in enumerate(filepaths):
-            feat = extract_features(fp)
-            if feat is not None:
-                features.append(feat)
-            progress_bar.progress((i + 1) / len(filepaths))
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    return np.array(features), np.array(labels)
+    for i, fp in enumerate(filepaths):
+        status_text.text(f"Đang xử lý ảnh {i+1}/{len(filepaths)}")
+        feat = extract_features(fp)
+        if feat is not None:
+            features.append(feat)
+        progress_bar.progress((i + 1) / len(filepaths))
+    
+    status_text.empty()
+    progress_bar.empty()
+    
+    if len(features) == 0:
+        return None, None
+    
+    return np.array(features), np.array(labels)[:len(features)]
 
 # ============================================
 # BƯỚC 1: TẢI LÊN DATASET
@@ -167,7 +179,7 @@ if uploaded_zip is not None:
                         base_dir = item_path
                         break
         
-        # Tìm các thư mục
+        # Tìm thư mục Train
         train_folder = None
         for folder in os.listdir(base_dir):
             if folder.lower() == 'train':
@@ -180,12 +192,13 @@ if uploaded_zip is not None:
             st.info("Đang load dữ liệu train...")
             X_train, y_train = load_dataset_from_folder(train_dir)
             
-            if X_train is not None:
-                st.success(f"✅ Đã load {len(X_train)} ảnh train với {len(np.unique(y_train))} loại món")
+            if X_train is not None and len(X_train) > 0:
+                class_names = np.unique(y_train)
+                st.success(f"✅ Đã load {len(X_train)} ảnh train với {len(class_names)} loại món")
                 
-                st.session_state.class_names = sorted(np.unique(y_train))
+                st.session_state.class_names = sorted(class_names)
                 
-                st.write(f"📋 Các món ăn: {', '.join(st.session_state.class_names)}")
+                st.write(f"📋 Các món ăn: {', '.join(st.session_state.class_names[:10])}" + ("..." if len(st.session_state.class_names) > 10 else ""))
                 
                 # ============================================
                 # BƯỚC 2: TRAIN MODEL
@@ -204,10 +217,14 @@ if uploaded_zip is not None:
                 )
                 
                 st.write(f"📊 Train: {len(X_train_split)} ảnh | Validation: {len(X_val_split)} ảnh")
+                st.write(f"📐 Số đặc trưng mỗi ảnh: {X_train.shape[1]}")
                 
                 # Tham số model
-                n_estimators = st.slider("Số cây (n_estimators)", 50, 300, 100, step=50)
-                max_depth = st.slider("Độ sâu tối đa (max_depth)", 10, 50, 20, step=5)
+                col1, col2 = st.columns(2)
+                with col1:
+                    n_estimators = st.slider("Số cây (n_estimators)", 50, 200, 100, step=50)
+                with col2:
+                    max_depth = st.slider("Độ sâu tối đa (max_depth)", 10, 50, 20, step=5)
                 
                 if st.button("🚀 BẮT ĐẦU TRAIN", use_container_width=True):
                     progress_bar = st.progress(0)
@@ -215,6 +232,7 @@ if uploaded_zip is not None:
                     
                     # Train Random Forest
                     status_text.text("Đang train Random Forest...")
+                    progress_bar.progress(0.3)
                     
                     model = RandomForestClassifier(
                         n_estimators=n_estimators,
@@ -225,7 +243,7 @@ if uploaded_zip is not None:
                     
                     model.fit(X_train_split, y_train_split)
                     
-                    progress_bar.progress(0.8)
+                    progress_bar.progress(0.7)
                     status_text.text("Đang đánh giá model...")
                     
                     # Đánh giá
@@ -243,21 +261,14 @@ if uploaded_zip is not None:
                     # Hiển thị báo cáo
                     st.markdown("#### 📊 Báo cáo chi tiết:")
                     report = classification_report(y_val_split, y_pred, target_names=st.session_state.class_names, output_dict=True)
-                    
-                    # Chuyển thành DataFrame để hiển thị
                     report_df = pd.DataFrame(report).transpose()
                     st.dataframe(report_df)
                     
-                    # Lưu model
-                    model_path = os.path.join(tmpdir, "model.pkl")
-                    with open(model_path, "wb") as f:
-                        pickle.dump((model, label_encoder, st.session_state.class_names), f)
-                    
                     st.info("💡 Model đã sẵn sàng! Chuyển sang Bước 3 để dự đoán.")
             else:
-                st.error("Không thể load dữ liệu từ folder Train!")
+                st.error("Không thể load dữ liệu từ folder Train! Vui lòng kiểm tra cấu trúc thư mục.")
         else:
-            st.error("Không tìm thấy thư mục Train!")
+            st.error("Không tìm thấy thư mục Train trong file zip!")
 
 # ============================================
 # BƯỚC 3: DỰ ĐOÁN
